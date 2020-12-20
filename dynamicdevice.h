@@ -96,6 +96,9 @@ protected:
   virtual ~cDynamicDevice();
   virtual bool Ready(void);
   virtual void MakePrimaryDevice(bool On);
+#if VDRVERSNUM > 20400
+  virtual bool IsBonded(void) const;
+#endif
 public:
   virtual cString DeviceType(void) const;
   virtual cString DeviceName(void) const;
@@ -109,6 +112,9 @@ public:
   virtual int NumProvidedSystems(void) const;
 #if VDRVERSNUM > 20101
   virtual const cPositioner *Positioner(void) const;
+#endif
+#if VDRVERSNUM > 20400
+  virtual bool SignalStats(int &Valid, double *Strength = NULL, double *Cnr = NULL, double *BerPre = NULL, double *BerPost = NULL, double *Per = NULL, int *Status = NULL) const;
 #endif
   virtual int SignalStrength(void) const;
   virtual int SignalQuality(void) const;

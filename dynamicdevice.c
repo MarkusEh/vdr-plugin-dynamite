@@ -747,6 +747,15 @@ void cDynamicDevice::MakePrimaryDevice(bool On)
   cDevice::MakePrimaryDevice(On);
 }
 
+#if VDRVERSNUM > 20400
+bool cDynamicDevice::IsBonded(void) const
+{
+  if (subDevice)
+     return subDevice->IsBonded();
+  return false;
+}
+#endif
+
 bool cDynamicDevice::HasDecoder(void) const
 {
   if (subDevice)
@@ -917,6 +926,15 @@ const cPositioner *cDynamicDevice::Positioner(void) const
   if (subDevice)
      return subDevice->Positioner();
   return cDevice::Positioner();
+}
+#endif
+
+#if VDRVERSNUM > 20400
+  bool cDynamicDevice::SignalStats(int &Valid, double *Strength, double *Cnr, double *BerPre, double *BerPost, double *Per, int *Status) const
+{
+  if (subDevice)
+     return subDevice->SignalStats(Valid, Strength, Cnr, BerPre, BerPost, Per, Status);
+  return cDevice::SignalStats(Valid, Strength, Cnr, BerPre, BerPost, Per, Status);
 }
 #endif
 

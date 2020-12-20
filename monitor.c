@@ -119,7 +119,6 @@ void cUdevMonitor::Action(void)
               }
            }
         }
-  close(fd);
 }
 
 bool cUdevMonitor::AddFilter(cUdevFilter *Filter)
