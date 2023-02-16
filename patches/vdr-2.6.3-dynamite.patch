@@ -1,59 +1,38 @@
-diff --git a/ci.c b/ci.c
-index 904697e..1e95313 100644
---- a/ci.c
-+++ b/ci.c
-@@ -1571,6 +1571,8 @@ cCamSlot::cCamSlot(cCiAdapter *CiAdapter)
- 
- cCamSlot::~cCamSlot()
- {
-+  if (ciAdapter && ciAdapter->assignedDevice)
-+     ciAdapter->assignedDevice->SetCamSlot(NULL);
-   CamSlots.Del(this, false);
-   DeleteAllConnections();
- }
-diff --git a/ci.h b/ci.h
-index 74e0270..818ea29 100644
---- a/ci.h
-+++ b/ci.h
-@@ -72,6 +72,7 @@ public:
-   };
- 
- class cDevice;
-+class cTSBufferBase;
- class cCamSlot;
- 
- enum eModuleStatus { msNone, msReset, msPresent, msReady };
-@@ -115,6 +116,13 @@ public:
+Description: Patch for VDR to support hotpluggable devices via the
+ dynamite plugin.
+Origin: https://github.com/flensrocker/vdr-plugin-dynamite
+Forwarded: no
+Author: Lars Hanisch <dvb@flensrocker.de>, MarkusE (vdr-portal.de)
+
+Index: vdr-2.6.3_sik/ci.h
+===================================================================
+--- vdr-2.6.3_sik.orig/ci.h	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/ci.h	2023-02-16 09:10:48.125147165 +0100
+@@ -209,6 +209,8 @@
+   cCiAdapter(void);
+   virtual ~cCiAdapter();
         ///< The derived class must call Cancel(3) in its destructor.
-   virtual bool Ready(void);
-        ///< Returns 'true' if all present CAMs in this adapter are ready.
-+#define EXTERNALCI_PATCH
-+  virtual cTSBufferBase *GetTSBuffer(int FdDvr) { return NULL; }
-+       ///< Derived classes can return a special TS buffer with features
-+       ///< like rerouting the stream through an external ci.
-+       ///< The caller must delete the buffer.
 +  virtual bool SetIdle(bool Idle, bool TestOnly) { return false; }
 +  virtual bool IsIdle(void) const { return false; }
    };
  
  class cTPDU;
-diff --git a/device.c b/device.c
-index 2678d68..56c2b9c 100644
---- a/device.c
-+++ b/device.c
-@@ -69,12 +69,22 @@ int cDevice::currentChannel = 1;
+Index: vdr-2.6.3_sik/device.c
+===================================================================
+--- vdr-2.6.3_sik.orig/device.c	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/device.c	2023-02-16 09:10:48.125147165 +0100
+@@ -75,12 +75,22 @@
  cDevice *cDevice::device[MAXDEVICES] = { NULL };
  cDevice *cDevice::primaryDevice = NULL;
  cList<cDeviceHook> cDevice::deviceHooks;
--
--cDevice::cDevice(void)
 +cDevice *cDevice::nextParentDevice = NULL;
-+ 
+ 
+-cDevice::cDevice(void)
 +cDevice::cDevice(cDevice *ParentDevice)
  :patPmtParser(true)
 -{
 -  cardIndex = nextCardIndex++;
--  dsyslog("new device number %d", CardIndex() + 1);
+-  dsyslog("new device number %d (card index %d)", numDevices + 1, CardIndex() + 1);
 +,isIdle(false)
 +,parentDevice(ParentDevice)
 +,subDevice(NULL)
@@ -65,11 +44,11 @@ index 2678d68..56c2b9c 100644
 +     cardIndex = parentDevice->cardIndex;
 +  else
 +     cardIndex = nextCardIndex++;
-+  dsyslog("new %sdevice number %d", parentDevice ? "sub-" : "", CardIndex() + 1);
++  dsyslog("new %sdevice number %d (card index %d)", parentDevice ? "sub-" : "", numDevices + 1, CardIndex() + 1);
  
-   SetDescription("receiver on device %d", CardIndex() + 1);
+   SetDescription("device %d receiver", numDevices + 1);
  
-@@ -105,10 +115,14 @@ cDevice::cDevice(void)
+@@ -111,10 +121,14 @@
    for (int i = 0; i < MAXRECEIVERS; i++)
        receiver[i] = NULL;
  
@@ -87,14 +66,15 @@ index 2678d68..56c2b9c 100644
  }
  
  cDevice::~cDevice()
-@@ -117,6 +131,29 @@ cDevice::~cDevice()
-   DetachAllReceivers();
-   delete liveSubtitle;
+@@ -125,9 +139,33 @@
    delete dvbSubtitleConverter;
+   if (this == primaryDevice)
+      primaryDevice = NULL;
 +  if (parentDevice && (parentDevice->subDevice == this))
 +     parentDevice->subDevice = NULL;
-+}
-+
+   Cancel(3);
+ }
+ 
 +bool cDevice::SetIdle(bool Idle)
 +{
 +  if (parentDevice)
@@ -114,10 +94,13 @@ index 2678d68..56c2b9c 100644
 +     return true;
 +  isIdle = !Idle;
 +  return false;
- }
- 
++}
++
++
  bool cDevice::WaitForAllDevicesReady(int Timeout)
-@@ -155,6 +192,8 @@ int cDevice::NextCardIndex(int n)
+ {
+   for (time_t t0 = time(NULL); time(NULL) - t0 < Timeout; ) {
+@@ -164,6 +202,8 @@
  
  int cDevice::DeviceNumber(void) const
  {
@@ -126,16 +109,16 @@ index 2678d68..56c2b9c 100644
    for (int i = 0; i < numDevices; i++) {
        if (device[i] == this)
           return i;
-@@ -355,6 +394,8 @@ bool cDevice::HasCi(void)
+@@ -450,6 +490,8 @@
  
  void cDevice::SetCamSlot(cCamSlot *CamSlot)
  {
 +  if (parentDevice)
 +     return parentDevice->SetCamSlot(CamSlot);
+   LOCK_THREAD;
    camSlot = CamSlot;
  }
- 
-@@ -567,6 +608,10 @@ void cDevice::DelLivePids(void)
+@@ -661,6 +703,10 @@
  
  void cDevice::StartSectionHandler(void)
  {
@@ -146,7 +129,7 @@ index 2678d68..56c2b9c 100644
    if (!sectionHandler) {
       sectionHandler = new cSectionHandler(this);
       AttachFilter(eitFilter = new cEitFilter);
-@@ -578,6 +623,10 @@ void cDevice::StartSectionHandler(void)
+@@ -672,6 +718,10 @@
  
  void cDevice::StopSectionHandler(void)
  {
@@ -157,7 +140,7 @@ index 2678d68..56c2b9c 100644
    if (sectionHandler) {
       delete nitFilter;
       delete sdtFilter;
-@@ -609,12 +658,17 @@ void cDevice::CloseFilter(int Handle)
+@@ -703,12 +753,17 @@
  
  void cDevice::AttachFilter(cFilter *Filter)
  {
@@ -175,7 +158,7 @@ index 2678d68..56c2b9c 100644
    if (sectionHandler)
       sectionHandler->Detach(Filter);
  }
-@@ -776,6 +830,7 @@ eSetChannelResult cDevice::SetChannel(const cChannel *Channel, bool LiveView)
+@@ -904,6 +959,7 @@
          sectionHandler->SetStatus(false);
          sectionHandler->SetChannel(NULL);
          }
@@ -183,12 +166,12 @@ index 2678d68..56c2b9c 100644
       // Tell the camSlot about the channel switch and add all PIDs of this
       // channel to it, for possible later decryption:
       if (camSlot)
-@@ -822,19 +877,27 @@ void cDevice::ForceTransferMode(void)
+@@ -951,19 +1007,27 @@
  {
    if (!cTransferControl::ReceiverDevice()) {
-      cChannel *Channel = Channels.GetByNumber(CurrentChannel());
--     if (Channel)
-+     if (Channel) {
+      LOCK_CHANNELS_READ;
+-     if (const cChannel *Channel = Channels->GetByNumber(CurrentChannel()))
++     if (const cChannel *Channel = Channels->GetByNumber(CurrentChannel())) {
 +        SetIdle(false);
          SetChannelDevice(Channel, false); // this implicitly starts Transfer Mode
 +        }
@@ -212,7 +195,7 @@ index 2678d68..56c2b9c 100644
    if (Seconds >= 0)
       occupiedTimeout = time(NULL) + min(Seconds, MAXOCCUPIEDTIMEOUT);
  }
-@@ -1209,7 +1272,10 @@ bool cDevice::Transferring(void) const
+@@ -1347,7 +1411,10 @@
  
  bool cDevice::AttachPlayer(cPlayer *Player)
  {
@@ -223,7 +206,7 @@ index 2678d68..56c2b9c 100644
       if (player)
          Detach(player);
       DELETENULL(liveSubtitle);
-@@ -1228,6 +1294,8 @@ bool cDevice::AttachPlayer(cPlayer *Player)
+@@ -1366,6 +1433,8 @@
  
  void cDevice::Detach(cPlayer *Player)
  {
@@ -232,7 +215,7 @@ index 2678d68..56c2b9c 100644
    if (Player && player == Player) {
       cPlayer *p = player;
       player = NULL; // avoids recursive calls to Detach()
-@@ -1247,6 +1315,8 @@ void cDevice::Detach(cPlayer *Player)
+@@ -1385,6 +1454,8 @@
  
  void cDevice::StopReplay(void)
  {
@@ -241,16 +224,16 @@ index 2678d68..56c2b9c 100644
    if (player) {
       Detach(player);
       if (IsPrimaryDevice())
-@@ -1529,6 +1599,8 @@ int cDevice::PlayTs(const uchar *Data, int Length, bool VideoOnly)
+@@ -1659,6 +1730,8 @@
  
  int cDevice::Priority(void) const
  {
 +  if (parentDevice)
 +     return parentDevice->Priority();
    int priority = IDLEPRIORITY;
-   if (IsPrimaryDevice() && !Replaying() && ActualDevice() == PrimaryDevice())
+   if (IsPrimaryDevice() && !Replaying() && HasProgramme())
       priority = TRANSFERPRIORITY; // we use the same value here, no matter whether it's actual Transfer Mode or real live viewing
-@@ -1547,6 +1619,8 @@ bool cDevice::Ready(void)
+@@ -1677,6 +1750,8 @@
  
  bool cDevice::Receiving(bool Dummy) const
  {
@@ -259,7 +242,7 @@ index 2678d68..56c2b9c 100644
    cMutexLock MutexLock(&mutexReceiver);
    for (int i = 0; i < MAXRECEIVERS; i++) {
        if (receiver[i])
-@@ -1627,10 +1701,13 @@ bool cDevice::GetTSPacket(uchar *&Data)
+@@ -1777,10 +1852,13 @@
  
  bool cDevice::AttachReceiver(cReceiver *Receiver)
  {
@@ -273,16 +256,16 @@ index 2678d68..56c2b9c 100644
  // activate the following line if you need it - actually the driver should be fixed!
  //#define WAIT_FOR_TUNER_LOCK
  #ifdef WAIT_FOR_TUNER_LOCK
-@@ -1669,6 +1746,8 @@ bool cDevice::AttachReceiver(cReceiver *Receiver)
+@@ -1831,6 +1909,8 @@
  
- void cDevice::Detach(cReceiver *Receiver)
+ void cDevice::Detach(cReceiver *Receiver, bool ReleaseCam)
  {
 +  if (parentDevice)
-+     return parentDevice->Detach(Receiver);
++     return parentDevice->Detach(Receiver, ReleaseCam);
    if (!Receiver || Receiver->device != this)
       return;
    bool receiversLeft = false;
-@@ -1694,6 +1773,8 @@ void cDevice::Detach(cReceiver *Receiver)
+@@ -1861,6 +1941,8 @@
  
  void cDevice::DetachAll(int Pid)
  {
@@ -291,18 +274,18 @@ index 2678d68..56c2b9c 100644
    if (Pid) {
       cMutexLock MutexLock(&mutexReceiver);
       for (int i = 0; i < MAXRECEIVERS; i++) {
-@@ -1706,6 +1787,8 @@ void cDevice::DetachAll(int Pid)
+@@ -1874,6 +1956,8 @@
  
  void cDevice::DetachAllReceivers(void)
  {
 +  if (parentDevice)
-+     return parentDevice->DetachAllReceivers();
++    return parentDevice->cDevice::DetachAllReceivers();
    cMutexLock MutexLock(&mutexReceiver);
    for (int i = 0; i < MAXRECEIVERS; i++)
-       Detach(receiver[i]);
-@@ -1778,3 +1861,25 @@ uchar *cTSBuffer::Get(void)
-      }
-   return NULL;
+       Detach(receiver[i], false);
+@@ -1957,3 +2041,25 @@
+ {
+   delivered = Count;
  }
 +
 +// --- cDynamicDeviceProbe -------------------------------------------------------
@@ -326,19 +309,11 @@ index 2678d68..56c2b9c 100644
 +{
 +  DynamicDeviceProbes.Del(this, false);
 +}
-diff --git a/device.h b/device.h
-index e2847d8..3a8aa01 100644
---- a/device.h
-+++ b/device.h
-@@ -24,6 +24,7 @@
- #include "spu.h"
- #include "thread.h"
- #include "tools.h"
-+#include <linux/dvb/frontend.h>
- 
- #define MAXDEVICES         16 // the maximum number of devices in the system
- #define MAXPIDHANDLES      64 // the maximum number of different PIDs per device
-@@ -169,7 +170,6 @@ private:
+Index: vdr-2.6.3_sik/device.h
+===================================================================
+--- vdr-2.6.3_sik.orig/device.h	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/device.h	2023-02-16 09:10:48.125147165 +0100
+@@ -185,7 +185,6 @@
    static int nextCardIndex;
    int cardIndex;
  protected:
@@ -346,25 +321,28 @@ index e2847d8..3a8aa01 100644
    virtual ~cDevice();
    virtual bool Ready(void);
           ///< Returns true if this device is ready. Devices with conditional
-@@ -196,9 +196,6 @@ protected:
-          ///< A derived class must call the MakePrimaryDevice() function of its
-          ///< base class.
+@@ -217,9 +216,6 @@
+          ///< May be dropped in a future version, if a better solution is found.
+          ///< Do not use otherwise!
  public:
--  bool IsPrimaryDevice(void) const { return this == primaryDevice; }
+-  bool IsPrimaryDevice(void) const { return this == primaryDevice && HasDecoder(); }
 -  int CardIndex(void) const { return cardIndex; }
 -         ///< Returns the card index of this device (0 ... MAXDEVICES - 1).
    int DeviceNumber(void) const;
-          ///< Returns the number of this device (0 ... numDevices).
+          ///< Returns the number of this device (0 ... numDevices - 1).
    virtual cString DeviceType(void) const;
-@@ -338,6 +335,7 @@ public:
-          ///< Returns true if the device is currently showing any programme to
-          ///< the user, either through replaying or live.
+@@ -458,8 +454,8 @@
+        ///< Attaches the given filter to this device.
+   void Detach(cFilter *Filter);
+        ///< Detaches the given filter from this device.
+-  const cSdtFilter *SdtFilter(void) const { return sdtFilter; }
+-  cSectionHandler *SectionHandler(void) const { return sectionHandler; }
++  const cSdtFilter *SdtFilter(void) const {  if (parentDevice) return parentDevice->sdtFilter; return sdtFilter; }
++  cSectionHandler *SectionHandler(void) const { if (parentDevice) return parentDevice->sectionHandler; return sectionHandler; }
  
-+  virtual bool SendDiseqcCmd(dvb_diseqc_master_cmd cmd) {return false;}
- // PID handle facilities
+ // Common Interface facilities:
  
- private:
-@@ -423,9 +421,6 @@ public:
+@@ -478,9 +474,6 @@
           ///< shall check whether the channel can be decrypted.
    void SetCamSlot(cCamSlot *CamSlot);
           ///< Sets the given CamSlot to be used with this device.
@@ -374,7 +352,7 @@ index e2847d8..3a8aa01 100644
  
  // Image Grab facilities
  
-@@ -581,9 +576,6 @@ private:
+@@ -643,9 +636,6 @@
    cTsToPes tsToPesSubtitle;
    bool isPlayingVideo;
  protected:
@@ -384,11 +362,11 @@ index e2847d8..3a8aa01 100644
    virtual bool CanReplay(void) const;
         ///< Returns true if this device can currently start a replay session.
    virtual bool SetPlayMode(ePlayMode PlayMode);
-@@ -795,6 +787,38 @@ public:
+@@ -863,6 +853,38 @@
         ///< Detaches all receivers from this device for this pid.
    virtual void DetachAllReceivers(void);
         ///< Detaches all receivers from this device.
-+       
++
 +// --- dynamite subdevice patch start ---
 +  friend class cDynamicDevice;
 +private:
@@ -404,7 +382,7 @@ index e2847d8..3a8aa01 100644
 +       ///< Returns a pointer to the patPmtParser, so that a derived device
 +       ///< can use the stream information from it.
 +public:
-+  bool IsPrimaryDevice(void) const { if (parentDevice) return parentDevice->IsPrimaryDevice(); return this == primaryDevice; }
++  bool IsPrimaryDevice(void) const { if (parentDevice) return parentDevice->IsPrimaryDevice(); return this == primaryDevice && HasDecoder(); }
 +  int CardIndex(void) const { if (parentDevice) return parentDevice->cardIndex; return cardIndex; }
 +         ///< Returns the card index of this device (0 ... MAXDEVICES - 1).
 +  cCamSlot *CamSlot(void) const { if (parentDevice) return parentDevice->CamSlot(); return camSlot; }
@@ -423,32 +401,10 @@ index e2847d8..3a8aa01 100644
    };
  
  /// Derived cDevice classes that can receive channels will have to provide
-@@ -805,7 +829,14 @@ public:
- /// sure the returned data points to a TS packet and automatically
- /// re-synchronizes after broken packets.
+@@ -903,4 +925,47 @@
+      ///< to Get().
+   };
  
--class cTSBuffer : public cThread {
-+class cTSBufferBase {
-+public:
-+  cTSBufferBase() {}
-+  virtual ~cTSBufferBase() {}
-+  virtual uchar *Get(void) = 0;
-+  };
-+
-+class cTSBuffer : public cTSBufferBase, public cThread {
- private:
-   int f;
-   int cardIndex;
-@@ -814,8 +845,51 @@ private:
-   virtual void Action(void);
- public:
-   cTSBuffer(int File, int Size, int CardIndex);
--  ~cTSBuffer();
--  uchar *Get(void);
-+  virtual ~cTSBuffer();
-+  virtual uchar *Get(void);
-+  };
-+
 +/// A plugin that want to create devices handled by the dynamite-plugin needs to create
 +/// a cDynamicDeviceProbe derived object on the heap in order to have its Probe()
 +/// function called, where it can actually create the appropriate device.
@@ -488,16 +444,16 @@ index e2847d8..3a8aa01 100644
 +     ///< object derived from cDevice if applicable.
 +     ///< Returns the device that has been created or NULL if not.
 +     ///< The dynamite-plugin will delete the device if it is detached.
-   };
- 
++  };
++
 +extern cList<cDynamicDeviceProbe> DynamicDeviceProbes;
-+  
++
  #endif //__DEVICE_H
-diff --git a/dvbci.c b/dvbci.c
-index 5289bbd..baa70bc 100644
---- a/dvbci.c
-+++ b/dvbci.c
-@@ -10,41 +10,70 @@
+Index: vdr-2.6.3_sik/dvbci.c
+===================================================================
+--- vdr-2.6.3_sik.orig/dvbci.c	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/dvbci.c	2023-02-16 09:10:48.125147165 +0100
+@@ -10,15 +10,18 @@
  #include "dvbci.h"
  #include <linux/dvb/ca.h>
  #include <sys/ioctl.h>
@@ -510,32 +466,15 @@ index 5289bbd..baa70bc 100644
 +cDvbCiAdapter::cDvbCiAdapter(cDevice *Device, int Fd, int Adapter, int Frontend)
  {
    device = Device;
-   SetDescription("CI adapter on device %d", device->DeviceNumber());
+   SetDescription("device %d CI adapter", device->DeviceNumber());
    fd = Fd;
--  ca_caps_t Caps;
--  if (ioctl(fd, CA_GET_CAP, &Caps) == 0) {
--     if ((Caps.slot_type & CA_CI_LINK) != 0) {
--        int NumSlots = Caps.slot_num;
--        if (NumSlots > 0) {
--           for (int i = 0; i < NumSlots; i++)
--               new cCamSlot(this);
--           Start();
--           }
--        else
--           esyslog("ERROR: no CAM slots found on device %d", device->DeviceNumber());
--        }
--     else
--        isyslog("device %d doesn't support CI link layer interface", device->DeviceNumber());
--     }
--  else
--     esyslog("ERROR: can't get CA capabilities on device %d", device->DeviceNumber());
 +  adapter = Adapter;
 +  frontend = Frontend;
 +  idle = false;
-+  GetNumCamSlots(Device, Fd, this);
-+  Start();
- }
- 
+   ca_caps_t Caps;
+   if (ioctl(fd, CA_GET_CAP, &Caps) == 0) {
+      if ((Caps.slot_type & CA_CI_LINK) != 0) {
+@@ -41,10 +44,44 @@
  cDvbCiAdapter::~cDvbCiAdapter()
  {
    Cancel(3);
@@ -547,7 +486,7 @@ index 5289bbd..baa70bc 100644
 +{
 +  if (fd >= 0)
 +     return true;
-+  fd = cDvbDevice::DvbOpen(DEV_DVB_CA, adapter, frontend, O_RDWR);
++  fd = DvbOpen(DEV_DVB_CA, adapter, frontend, O_RDWR);
 +  return (fd >= 0);
 +}
 +
@@ -571,13 +510,6 @@ index 5289bbd..baa70bc 100644
 +     OpenCa();
 +  idle = Idle;
 +  return true;
-+}
-+
-+cTSBufferBase *cDvbCiAdapter::GetTSBuffer(int FdDvr)
-+{
-+  if (device)
-+     return new cTSBuffer(FdDvr, MEGABYTE(5), device->CardIndex() + 1);
-+  return NULL;
  }
  
  int cDvbCiAdapter::Read(uint8_t *Buffer, int MaxLength)
@@ -587,7 +519,7 @@ index 5289bbd..baa70bc 100644
    if (Buffer && MaxLength > 0) {
       struct pollfd pfd[1];
       pfd[0].fd = fd;
-@@ -61,6 +90,8 @@ int cDvbCiAdapter::Read(uint8_t *Buffer, int MaxLength)
+@@ -61,6 +98,8 @@
  
  void cDvbCiAdapter::Write(const uint8_t *Buffer, int Length)
  {
@@ -596,7 +528,7 @@ index 5289bbd..baa70bc 100644
    if (Buffer && Length > 0) {
       if (safe_write(fd, Buffer, Length) != Length)
          esyslog("ERROR: can't write to CI adapter on device %d: %m", device->DeviceNumber());
-@@ -69,6 +100,8 @@ void cDvbCiAdapter::Write(const uint8_t *Buffer, int Length)
+@@ -69,6 +108,8 @@
  
  bool cDvbCiAdapter::Reset(int Slot)
  {
@@ -605,7 +537,7 @@ index 5289bbd..baa70bc 100644
    if (ioctl(fd, CA_RESET, 1 << Slot) != -1)
       return true;
    else
-@@ -78,6 +111,8 @@ bool cDvbCiAdapter::Reset(int Slot)
+@@ -78,6 +119,8 @@
  
  eModuleStatus cDvbCiAdapter::ModuleStatus(int Slot)
  {
@@ -614,77 +546,24 @@ index 5289bbd..baa70bc 100644
    ca_slot_info_t sinfo;
    sinfo.num = Slot;
    if (ioctl(fd, CA_GET_SLOT_INFO, &sinfo) != -1) {
-@@ -99,10 +134,60 @@ bool cDvbCiAdapter::Assign(cDevice *Device, bool Query)
+@@ -99,10 +142,10 @@
    return true;
  }
  
 -cDvbCiAdapter *cDvbCiAdapter::CreateCiAdapter(cDevice *Device, int Fd)
-+int cDvbCiAdapter::GetNumCamSlots(cDevice *Device, int Fd, cCiAdapter *CiAdapter)
- {
--  // TODO check whether a CI is actually present?
--  if (Device)
--     return new cDvbCiAdapter(Device, Fd);
--  return NULL;
-+  int NumSlots = -1;
-+  if (Fd >= 0) {
-+     ca_caps_t Caps;
-+     if (ioctl(Fd, CA_GET_CAP, &Caps) == 0) {
-+        if ((Caps.slot_type & CA_CI_LINK) != 0) {
-+           NumSlots = Caps.slot_num;
-+           if (NumSlots == 0)
-+              esyslog("ERROR: no CAM slots found on device %d", Device->DeviceNumber());
-+           else if (CiAdapter != NULL) {
-+              for (int i = 0; i < NumSlots; i++)
-+                  new cCamSlot(CiAdapter);
-+              }
-+           else
-+              return NumSlots;
-+           }
-+        else
-+           isyslog("device %d doesn't support CI link layer interface", Device->DeviceNumber());
-+        }
-+     else
-+        esyslog("ERROR: can't get CA capabilities on device %d", Device->DeviceNumber());
-+     }
-+  return -1;
-+}
-+
 +cDvbCiAdapter *cDvbCiAdapter::CreateCiAdapter(cDevice *Device, int Fd, int Adapter, int Frontend)
-+{
-+  // don't create a ci-adapter if it's not useable
-+  if (Device && (Fd >= 0) && (GetNumCamSlots(Device, Fd, NULL) > 0))
+ {
+   // TODO check whether a CI is actually present?
+   if (Device)
+-     return new cDvbCiAdapter(Device, Fd);
 +     return new cDvbCiAdapter(Device, Fd, Adapter, Frontend);
-+
-+  if (Fd >= 0)
-+     close(Fd);
-+
-+  // try to find an external ci-adapter
-+  for (cDvbCiAdapterProbe *cp = DvbCiAdapterProbes.First(); cp; cp = DvbCiAdapterProbes.Next(cp)) {
-+      cDvbCiAdapter *ca = cp->Probe(Device);
-+      if (ca)
-+         return ca;
-+      }
-+ return NULL;
-+}
-+
-+// --- cDvbCiAdapterProbe -------------------------------------------------------
-+
-+cList<cDvbCiAdapterProbe> DvbCiAdapterProbes;
-+
-+cDvbCiAdapterProbe::cDvbCiAdapterProbe(void)
-+{
-+  DvbCiAdapterProbes.Add(this);
-+}
-+
-+cDvbCiAdapterProbe::~cDvbCiAdapterProbe()
-+{
-+  DvbCiAdapterProbes.Del(this, false);
+   return NULL;
  }
-diff --git a/dvbci.h b/dvbci.h
-index adbe40d..d908b2f 100644
---- a/dvbci.h
-+++ b/dvbci.h
-@@ -16,16 +16,48 @@ class cDvbCiAdapter : public cCiAdapter {
+Index: vdr-2.6.3_sik/dvbci.h
+===================================================================
+--- vdr-2.6.3_sik.orig/dvbci.h	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/dvbci.h	2023-02-16 09:10:48.129147113 +0100
+@@ -16,16 +16,24 @@
  private:
    cDevice *device;
    int fd;
@@ -705,68 +584,17 @@ index adbe40d..d908b2f 100644
  public:
    virtual ~cDvbCiAdapter();
 -  static cDvbCiAdapter *CreateCiAdapter(cDevice *Device, int Fd);
-+  virtual cTSBufferBase *GetTSBuffer(int FdDvr);
-+  static int GetNumCamSlots(cDevice *Device, int Fd, cCiAdapter *CiAdapter);
-+   ///< Tests if the CA device is usable for vdr.
-+   ///< If CiAdapter is not NULL it will create the CamSlots for the given ci-adapter.
 +  virtual bool SetIdle(bool Idle, bool TestOnly);
 +  virtual bool IsIdle(void) const { return idle; }
 +  static cDvbCiAdapter *CreateCiAdapter(cDevice *Device, int Fd, int Adapter = -1, int Frontend = -1);
-+  };
-+
-+// A plugin that implements an external DVB ci-adapter derived from cDvbCiAdapter needs to create
-+// a cDvbCiAdapterProbe derived object on the heap in order to have its Probe()
-+// function called, where it can actually create the appropriate ci-adapter.
-+// The cDvbCiAdapterProbe object must be created in the plugin's constructor,
-+// and deleted in its destructor.
-+// Every plugin has to track its own list of already used device nodes.
-+// The Probes are always called if the base cDvbCiAdapter can't create a ci-adapter on its own.
-+
-+class cDvbCiAdapterProbe : public cListObject {
-+public:
-+  cDvbCiAdapterProbe(void);
-+  virtual ~cDvbCiAdapterProbe();
-+  virtual cDvbCiAdapter *Probe(cDevice *Device) = 0;
-+     ///< Probes for a DVB ci-adapter for the given Device and creates the appropriate
-+     ///< object derived from cDvbCiAdapter if applicable.
-+     ///< Returns NULL if no adapter has been created.
    };
  
-+extern cList<cDvbCiAdapterProbe> DvbCiAdapterProbes;
-+
  #endif //__DVBCI_H
-diff --git a/dvbdevice.c b/dvbdevice.c
-index 43e8544..49b5f61 100644
---- a/dvbdevice.c
-+++ b/dvbdevice.c
-@@ -287,9 +287,10 @@ class cDvbTuner : public cThread {
- private:
-   static cMutex bondMutex;
-   enum eTunerStatus { tsIdle, tsSet, tsTuned, tsLocked };
-+  bool SendDiseqc;
-   int frontendType;
-   const cDvbDevice *device;
--  int fd_frontend;
-+  mutable int fd_frontend;
-   int adapter, frontend;
-   uint32_t subsystemId;
-   int tuneTimeout;
-@@ -300,7 +301,7 @@ private:
-   const cScr *scr;
-   bool lnbPowerTurnedOn;
-   eTunerStatus tunerStatus;
--  cMutex mutex;
-+  mutable cMutex mutex;
-   cCondVar locked;
-   cCondVar newSet;
-   cDvbTuner *bondedTuner;
-@@ -308,11 +309,16 @@ private:
-   bool SetFrontendType(const cChannel *Channel);
-   cString GetBondingParams(const cChannel *Channel = NULL) const;
-   void ClearEventQueue(void) const;
-+  dvb_diseqc_master_cmd diseqc_cmd;
-   bool GetFrontendStatus(fe_status_t &Status) const;
-   void ExecuteDiseqc(const cDiseqc *Diseqc, unsigned int *Frequency);
+Index: vdr-2.6.3_sik/dvbdevice.c
+===================================================================
+--- vdr-2.6.3_sik.orig/dvbdevice.c	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/dvbdevice.c	2023-02-16 09:10:48.129147113 +0100
+@@ -571,6 +571,10 @@
    void ResetToneAndVoltage(void);
    bool SetFrontend(void);
    virtual void Action(void);
@@ -775,48 +603,35 @@ index 43e8544..49b5f61 100644
 +  bool OpenFrontend(void) const;
 +  bool CloseFrontend(void);
  public:
-   cDvbTuner(const cDvbDevice *Device, int Fd_Frontend, int Adapter, int Frontend);
+   cDvbTuner(const cDvbDevice *Device, int Adapter, int Frontend);
    virtual ~cDvbTuner();
-@@ -325,9 +331,13 @@ public:
-   uint32_t SubsystemId(void) const { return subsystemId; }
-   bool IsTunedTo(const cChannel *Channel) const;
-   void SetChannel(const cChannel *Channel);
-+  bool SendDiseqcCmd(dvb_diseqc_master_cmd cmd);
-   bool Locked(int TimeoutMs = 0);
+@@ -593,6 +597,8 @@
+   bool GetSignalStats(int &Valid, double *Strength = NULL, double *Cnr = NULL, double *BerPre = NULL, double *BerPost = NULL, double *Per = NULL, int *Status = NULL) const;
    int GetSignalStrength(void) const;
    int GetSignalQuality(void) const;
-+
 +  bool SetIdle(bool Idle);
 +  bool IsIdle(void) const { return isIdle; }
    };
  
  cMutex cDvbTuner::bondMutex;
-@@ -337,6 +347,7 @@ cDvbTuner::cDvbTuner(const cDvbDevice *Device, int Fd_Frontend, int Adapter, int
-   frontendType = SYS_UNDEFINED;
-   device = Device;
-   fd_frontend = Fd_Frontend;
-+  SendDiseqc=false;
-   adapter = Adapter;
-   frontend = Frontend;
-   subsystemId = cDvbDeviceProbe::GetSubsystemId(adapter, frontend);
-@@ -349,6 +360,7 @@ cDvbTuner::cDvbTuner(const cDvbDevice *Device, int Fd_Frontend, int Adapter, int
+@@ -620,6 +626,7 @@
    tunerStatus = tsIdle;
    bondedTuner = NULL;
    bondedMaster = false;
 +  isIdle = false;
-   SetDescription("tuner on frontend %d/%d", adapter, frontend);
-   Start();
- }
-@@ -366,6 +378,8 @@ cDvbTuner::~cDvbTuner()
+   cDvbFrontend *fe = new cDvbFrontend(adapter, frontend);
+   dvbFrontends.Append(fe);
+   numDeliverySystems = fe->NumDeliverySystems();
+@@ -661,6 +668,8 @@
       ExecuteDiseqc(lastDiseqc, &Frequency);
       }
    */
-+  if (device && device->IsSubDevice())
-+     CloseFrontend();
++  /* if (device && device->IsSubDevice())
++     CloseFrontend();  */
+   for (int i = 0; i < dvbFrontends.Size(); i++)
+       delete dvbFrontends[i];
  }
- 
- bool cDvbTuner::Bond(cDvbTuner *Tuner)
-@@ -510,6 +524,8 @@ bool cDvbTuner::Locked(int TimeoutMs)
+@@ -849,6 +858,8 @@
  
  void cDvbTuner::ClearEventQueue(void) const
  {
@@ -825,39 +640,19 @@ index 43e8544..49b5f61 100644
    cPoller Poller(fd_frontend);
    if (Poller.Poll(TUNER_POLL_TIMEOUT)) {
       dvb_frontend_event Event;
-@@ -710,8 +726,28 @@ static int GetRequiredDeliverySystem(const cChannel *Channel, const cDvbTranspon
-   return ds;
- }
+@@ -1542,6 +1553,8 @@
  
-+bool cDvbTuner::SendDiseqcCmd(dvb_diseqc_master_cmd cmd)
-+{
-+  cMutexLock MutexLock(&mutex);
-+  cDvbTransponderParameters dtp(channel.Parameters());
-+
-+  // Determine the required frontend type:
-+  int frontendType = GetRequiredDeliverySystem(&channel, &dtp);
-+
-+  if ((frontendType!=SYS_DVBS2 && frontendType!=SYS_DVBS) || SendDiseqc)
-+    return false;
-+  if (!OpenFrontend())
-+     return false;
-+  diseqc_cmd=cmd;
-+  SendDiseqc=true;
-+  newSet.Broadcast();
-+  return true;
-+}
-+
  bool cDvbTuner::SetFrontend(void)
  {
 +  if (!OpenFrontend())
 +     return false;
- #define MAXFRONTENDCMDS 16
- #define SETCMD(c, d) { Frontend[CmdSeq.num].cmd = (c);\
-                        Frontend[CmdSeq.num].u.data = (d);\
-@@ -857,10 +893,16 @@ void cDvbTuner::Action(void)
-   bool LostLock = false;
+   dtv_property Props[MAXFRONTENDCMDS];
+   memset(&Props, 0, sizeof(Props));
+   dtv_properties CmdSeq;
+@@ -1687,9 +1700,11 @@
    fe_status_t Status = (fe_status_t)0;
    while (Running()) {
+         int WaitTime = 1000;
 -        fe_status_t NewStatus;
 -        if (GetFrontendStatus(NewStatus))
 -           Status = NewStatus;
@@ -867,14 +662,9 @@ index 43e8544..49b5f61 100644
 +              Status = NewStatus;
 +           }
          cMutexLock MutexLock(&mutex);
-+        if (SendDiseqc) {
-+           CHECK(ioctl(fd_frontend, FE_DISEQC_SEND_MASTER_CMD, &diseqc_cmd));
-+           SendDiseqc=false;
-+           }
-         int WaitTime = 1000;
          switch (tunerStatus) {
            case tsIdle:
-@@ -912,6 +954,40 @@ void cDvbTuner::Action(void)
+@@ -1768,6 +1783,40 @@
          }
  }
  
@@ -893,7 +683,7 @@ index 43e8544..49b5f61 100644
 +  if (fd_frontend >= 0)
 +     return true;
 +  cMutexLock MutexLock(&mutex);
-+  fd_frontend = cDvbDevice::DvbOpen(DEV_DVB_FRONTEND, adapter, frontend, O_RDWR | O_NONBLOCK);
++  fd_frontend = dvbFrontend->Open();
 +  if (fd_frontend < 0)
 +     return false;
 +  isIdle = false;
@@ -907,7 +697,7 @@ index 43e8544..49b5f61 100644
 +  cMutexLock MutexLock(&mutex);
 +  tunerStatus = tsIdle;
 +  newSet.Broadcast();
-+  close(fd_frontend);
++  dvbFrontend->Close();
 +  fd_frontend = -1;
 +  return true;
 +}
@@ -915,9 +705,9 @@ index 43e8544..49b5f61 100644
  // --- cDvbSourceParam -------------------------------------------------------
  
  class cDvbSourceParam : public cSourceParam {
-@@ -997,7 +1073,8 @@ const char *DeliverySystemNames[] = {
-   NULL
-   };
+@@ -1835,7 +1884,8 @@
+ int cDvbDevice::setTransferModeForDolbyDigital = 1;
+ cMutex cDvbDevice::bondMutex;
  
 -cDvbDevice::cDvbDevice(int Adapter, int Frontend)
 +cDvbDevice::cDvbDevice(int Adapter, int Frontend, cDevice *ParentDevice)
@@ -925,19 +715,16 @@ index 43e8544..49b5f61 100644
  {
    adapter = Adapter;
    frontend = Frontend;
-@@ -1015,9 +1092,8 @@ cDvbDevice::cDvbDevice(int Adapter, int Frontend)
+@@ -1849,7 +1899,7 @@
  
-   // Common Interface:
- 
--  fd_ca = DvbOpen(DEV_DVB_CA, adapter, frontend, O_RDWR);
--  if (fd_ca >= 0)
+   fd_ca = DvbOpen(DEV_DVB_CA, adapter, frontend, O_RDWR);
+   if (fd_ca >= 0)
 -     ciAdapter = cDvbCiAdapter::CreateCiAdapter(this, fd_ca);
-+  int fd_ca = DvbOpen(DEV_DVB_CA, adapter, frontend, O_RDWR);
-+  ciAdapter = cDvbCiAdapter::CreateCiAdapter(parentDevice ? parentDevice : this, fd_ca, adapter, frontend);
++     ciAdapter = cDvbCiAdapter::CreateCiAdapter(parentDevice ? parentDevice : this, fd_ca, adapter, frontend);
+   checkTsBuffer = false;
  
    // The DVR device (will be opened and closed as needed):
- 
-@@ -1245,7 +1321,11 @@ bool cDvbDevice::BondDevices(const char *Bondings)
+@@ -2009,7 +2059,11 @@
           if (d >= 0) {
              int ErrorDevice = 0;
              if (cDevice *Device1 = cDevice::GetDevice(i)) {
@@ -949,7 +736,7 @@ index 43e8544..49b5f61 100644
                    if (cDvbDevice *DvbDevice1 = dynamic_cast<cDvbDevice *>(Device1)) {
                       if (cDvbDevice *DvbDevice2 = dynamic_cast<cDvbDevice *>(Device2)) {
                          if (!DvbDevice1->Bond(DvbDevice2))
-@@ -1279,7 +1359,10 @@ bool cDvbDevice::BondDevices(const char *Bondings)
+@@ -2043,7 +2097,10 @@
  void cDvbDevice::UnBondDevices(void)
  {
    for (int i = 0; i < cDevice::NumDevices(); i++) {
@@ -961,7 +748,7 @@ index 43e8544..49b5f61 100644
           d->UnBond();
        }
  }
-@@ -1333,6 +1416,26 @@ bool cDvbDevice::BondingOk(const cChannel *Channel, bool ConsiderOccupied) const
+@@ -2097,6 +2154,26 @@
    return true;
  }
  
@@ -988,92 +775,32 @@ index 43e8544..49b5f61 100644
  bool cDvbDevice::HasCi(void)
  {
    return ciAdapter;
-@@ -1499,7 +1602,7 @@ bool cDvbDevice::ProvidesChannel(const cChannel *Channel, int Priority, bool *Ne
+@@ -2257,7 +2334,7 @@
  
  bool cDvbDevice::ProvidesEIT(void) const
  {
--  return dvbTuner != NULL;
-+  return !IsIdle() && (dvbTuner != NULL) && !dvbTuner->IsIdle() && ((ciAdapter == NULL) || !ciAdapter->IsIdle());
+-  return dvbTuner != NULL && DeviceHooksProvidesEIT();
++  return (!IsIdle() && (dvbTuner != NULL) && !dvbTuner->IsIdle() && ((ciAdapter == NULL) || !ciAdapter->IsIdle()) ) && DeviceHooksProvidesEIT();
  }
  
  int cDvbDevice::NumProvidedSystems(void) const
-@@ -1544,6 +1647,11 @@ bool cDvbDevice::HasLock(int TimeoutMs)
-   return dvbTuner ? dvbTuner->Locked(TimeoutMs) : false;
- }
- 
-+bool cDvbDevice::SendDiseqcCmd(dvb_diseqc_master_cmd cmd)
-+{
-+  return dvbTuner->SendDiseqcCmd(cmd);
-+}
-+
- void cDvbDevice::SetTransferModeForDolbyDigital(int Mode)
- {
-   setTransferModeForDolbyDigital = Mode;
-@@ -1553,8 +1661,12 @@ bool cDvbDevice::OpenDvr(void)
- {
-   CloseDvr();
-   fd_dvr = DvbOpen(DEV_DVB_DVR, adapter, frontend, O_RDONLY | O_NONBLOCK, true);
--  if (fd_dvr >= 0)
--     tsBuffer = new cTSBuffer(fd_dvr, MEGABYTE(5), CardIndex() + 1);
-+  if (fd_dvr >= 0) {
-+     if (ciAdapter)
-+        tsBuffer = ciAdapter->GetTSBuffer(fd_dvr);
-+     if (tsBuffer == NULL)
-+        tsBuffer = new cTSBuffer(fd_dvr, MEGABYTE(5), CardIndex() + 1);
-+     }
-   return fd_dvr >= 0;
- }
- 
-diff --git a/dvbdevice.h b/dvbdevice.h
-index 7da9c56..6cd4abf 100644
---- a/dvbdevice.h
-+++ b/dvbdevice.h
-@@ -107,7 +107,7 @@ class cDvbTuner;
- /// The cDvbDevice implements a DVB device which can be accessed through the Linux DVB driver API.
- 
- class cDvbDevice : public cDevice {
--protected:
-+public:
-   static cString DvbName(const char *Name, int Adapter, int Frontend);
-   static int DvbOpen(const char *Name, int Adapter, int Frontend, int Mode, bool ReportError = false);
- private:
-@@ -127,19 +127,20 @@ private:
-   int deliverySystems[MAXDELIVERYSYSTEMS];
-   int numDeliverySystems;
-   int numModulations;
--  int fd_dvr, fd_ca;
-+  int fd_dvr;
-   static cMutex bondMutex;
+Index: vdr-2.6.3_sik/dvbdevice.h
+===================================================================
+--- vdr-2.6.3_sik.orig/dvbdevice.h	2023-02-16 09:10:48.141146957 +0100
++++ vdr-2.6.3_sik/dvbdevice.h	2023-02-16 09:10:48.129147113 +0100
+@@ -187,12 +187,14 @@
    cDvbDevice *bondedDevice;
    mutable bool needsDetachBondedReceivers;
-   bool QueryDeliverySystems(int fd_frontend);
  public:
 -  cDvbDevice(int Adapter, int Frontend);
 +  cDvbDevice(int Adapter, int Frontend, cDevice *ParentDevice = NULL);
    virtual ~cDvbDevice();
    int Adapter(void) const { return adapter; }
-   int Frontend(void) const { return frontend; }
-   virtual bool Ready(void);
+   int Frontend(void) const;
    virtual cString DeviceType(void) const;
    virtual cString DeviceName(void) const;
 +  virtual bool SetIdleDevice(bool Idle, bool TestOnly);
++
    static bool BondDevices(const char *Bondings);
         ///< Bonds the devices as defined in the given Bondings string.
         ///< A bonding is a sequence of device numbers (starting at 1),
-@@ -193,6 +194,7 @@ protected:
-   virtual bool SetChannelDevice(const cChannel *Channel, bool LiveView);
- public:
-   virtual bool HasLock(int TimeoutMs = 0);
-+  virtual bool SendDiseqcCmd(dvb_diseqc_master_cmd cmd);
- 
- // PID handle facilities
- 
-@@ -225,7 +227,7 @@ public:
- // Receiver facilities
- 
- private:
--  cTSBuffer *tsBuffer;
-+  cTSBufferBase *tsBuffer;
- protected:
-   virtual bool OpenDvr(void);
-   virtual void CloseDvr(void);
