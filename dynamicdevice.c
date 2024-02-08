@@ -502,7 +502,7 @@ void cDynamicDevice::AutoIdle(void)
             }
          else {
             seconds = now - dynamicdevice[i]->lastCloseDvr;
-            if ((dynamicdevice[i]->lastCloseDvr > 0) && (seconds >= (idleTimeoutMinutes * 60))) {
+            if ((!dynamicdevice[i]->Occupied() ) && (dynamicdevice[i]->lastCloseDvr > 0) && (seconds >= (idleTimeoutMinutes * 60))) {
                if (dynamicdevice[i]->lastCloseDvr > 0)
                   isyslog("dynamite: device %s unused for %d minutes, set to idle", dynamicdevice[i]->GetDevPath(), seconds / 60);
                else

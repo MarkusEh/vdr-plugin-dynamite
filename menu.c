@@ -63,21 +63,21 @@ public:
         cDynamicDevice::AttachDevicePattern("/dev/dvb/adapter*/frontend*");
         return osEnd;
       case maDetach:
-        isyslog("dynamite: menu action: detach device %s", DevPath);
+        isyslog("dynamite: menu action: detach device %s", DevPath?DevPath:"NULL");
         cDynamicDeviceProbe::QueueDynamicDeviceCommand(ddpcDetach, DevPath);
         return osEnd;
       case maLock:
       case maUnlock:
-        isyslog("dynamite: menu action: %slock device %s", (action == maUnlock ? "un" : ""), DevPath);
+        isyslog("dynamite: menu action: %slock device %s", (action == maUnlock ? "un" : ""), DevPath?DevPath:"NULL");
         cDynamicDevice::SetLockDevice(DevPath, action == maLock);
         break;
       case maDisableAutoIdle:
       case maEnableAutoIdle:
-        isyslog("dynamite: menu action: %s auto-idle mode on device %s", (action == maDisableAutoIdle ? "disable" : "enable"), DevPath);
+        isyslog("dynamite: menu action: %s auto-idle mode on device %s", (action == maDisableAutoIdle ? "disable" : "enable"), DevPath?DevPath:"NULL");
         cDynamicDevice::SetAutoIdle(DevPath, action == maDisableAutoIdle);
         break;
       case maSetIdle:
-        isyslog("dynamite: menu action: set idle mode on device %s", DevPath);
+        isyslog("dynamite: menu action: set idle mode on device %s", DevPath?DevPath:"NULL");
         cDynamicDevice::SetIdle(DevPath, true);
         break;
       default:
