@@ -973,6 +973,15 @@ bool cDynamicDevice::MaySwitchTransponder(const cChannel *Channel) const
   return cDevice::MaySwitchTransponder(Channel);
 }
 
+#if VDRVERSNUM >= 20608
+void cDynamicDevice::SetPowerSaveMode(bool On)
+{
+  if (subDevice)
+     return subDevice->SetPowerSaveMode(On);
+  return cDevice::SetPowerSaveMode(On);
+}
+#endif
+
 bool cDynamicDevice::SetChannelDevice(const cChannel *Channel, bool LiveView)
 {
   if (subDevice)

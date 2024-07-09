@@ -121,6 +121,9 @@ public:
   virtual const cChannel *GetCurrentlyTunedTransponder(void) const;
   virtual bool IsTunedToTransponder(const cChannel *Channel) const;
   virtual bool MaySwitchTransponder(const cChannel *Channel) const;
+#if VDRVERSNUM >= 20608
+  virtual void SetPowerSaveMode(bool On);
+#endif
 protected:
   virtual bool SetChannelDevice(const cChannel *Channel, bool LiveView);
 public:
