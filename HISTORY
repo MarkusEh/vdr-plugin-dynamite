@@ -282,5 +282,5 @@ VDR Plugin 'dynamite' Revision History
 2024-07-09: Version 0.3.2
 
 - adjust to vdr 2.6.8
--  --idle-timeout and --idle-wakeup (and the hole idle-timeout functionality) is deprecated,
+-  --idle-timeout and --idle-wakeup (and the whole idle-timeout functionality) is deprecated,
            please use the functionality now available in vdr 2.6.8
