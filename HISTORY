@@ -284,3 +284,9 @@ VDR Plugin 'dynamite' Revision History
 - adjust to vdr 2.6.8
 -  --idle-timeout and --idle-wakeup (and the whole idle-timeout functionality) is deprecated,
            please use the functionality now available in vdr 2.6.8
+
+2024-10-31: Version 0.3.3
+
+- Remove usage of MainThreadHook. See:
+       - https://www.vdr-portal.de/forum/index.php?thread/136534-ab-wann-nach-start-des-vdr-kann-ein-plugin-osd-meldungen-ausgeben/&postID=1376107#post1376107
+       - https://www.vdr-portal.de/forum/index.php?thread/136531-mainthreadhook-wozu-wird-der-heute-noch-ben%C3%B6tigt/

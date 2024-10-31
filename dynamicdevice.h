@@ -194,4 +194,26 @@ public:
 #endif
   };
 
+class cDynamiteWorker: public cThread {
+  private:
+    cMutex m_mutex;
+    cCondVar m_waitCondition;
+  public:
+    cDynamiteWorker() {}
+    virtual ~cDynamiteWorker() {}
+    void Stop() {
+      m_waitCondition.Broadcast();  // wakeup the thread
+      Cancel(10);                   // wait up to 10 seconds for thread was stopping
+    }
+    virtual void Action() {
+      m_mutex.Lock();
+      int loopSleep = 500; // do this every 1/2 second
+      while (Running()) {
+        m_waitCondition.TimedWait(m_mutex, loopSleep);
+        if (!cDynamicDevice::ProcessQueuedCommands())
+          esyslog("dynamite: can't process all queued commands");
+      }
+    }
+};
+
 #endif //__DYNAMITEDEVICE_H

@@ -5,13 +5,14 @@
  */
 
 #include <getopt.h>
+#include <memory>
 #include <vdr/plugin.h>
 #include "dynamicdevice.h"
 #include "menu.h"
 #include "monitor.h"
 #include "status.h"
 
-static const char *VERSION        = "0.3.2";
+static const char *VERSION        = "0.3.3";
 static const char *DESCRIPTION    = tr("attach/detach devices on the fly");
 static const char *MAINMENUENTRY  = NULL;
 
@@ -75,6 +76,7 @@ private:
   cString *getTSTimeoutHandler;
   int  freeDeviceSlots;
   int  lastHousekeeping;
+  std::unique_ptr<cDynamiteWorker> m_dynamiteWorker;
 public:
   cPluginDynamite(void);
   virtual ~cPluginDynamite();
@@ -86,7 +88,6 @@ public:
   virtual bool Start(void);
   virtual void Stop(void);
   virtual void Housekeeping(void);
-  virtual void MainThreadHook(void);
   virtual cString Active(void);
   virtual time_t WakeupTime(void);
   virtual const char *MainMenuEntry(void) { return MAINMENUENTRY; }
@@ -316,12 +317,20 @@ bool cPluginDynamite::Start(void)
 
   if (!cDynamicDevice::ProcessQueuedCommands())
      esyslog("dynamite: can't process all queued commands");
+  m_dynamiteWorker.reset( new cDynamiteWorker );
+  m_dynamiteWorker->Start();
+  if (!cDynamicDevice::enableOsdMessages)
+     cDynamicDevice::enableOsdMessages = true;
   return true;
 }
 
 void cPluginDynamite::Stop(void)
 {
   cDynamicDevice::DetachAllDevices(true);
+  while (m_dynamiteWorker->Active()) {
+    m_dynamiteWorker->Stop();
+    sleep(1);
+  }
 }
 
 void cPluginDynamite::Housekeeping(void)
@@ -333,16 +342,6 @@ void cPluginDynamite::Housekeeping(void)
      cDynamicDevice::AutoIdle();
      lastHousekeeping = now;
      }
-}
-
-void cPluginDynamite::MainThreadHook(void)
-{
-  // Perform actions in the context of the main program thread.
-  // WARNING: Use with great care - see PLUGINS.html!
-  if (!cDynamicDevice::ProcessQueuedCommands())
-     esyslog("dynamite: can't process all queued commands");
-  if (!cDynamicDevice::enableOsdMessages)
-     cDynamicDevice::enableOsdMessages = true;
 }
 
 cString cPluginDynamite::Active(void)
